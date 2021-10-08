@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: poc
+spec:
+  selector:
+    matchLabels:
+      app: poc
+  template:
+    metadata:
+      labels:
+        app: poc
+    spec:
+      containers:
+      - name: poc
+        image: linkerd-tproxy-poc:v0.8
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            add:
+            - NET_ADMIN
+            - NET_RAW
+          runAsUser: 0
+          runAsNonRoot: false
+      restartPolicy: Always
