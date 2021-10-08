@@ -1,4 +1,4 @@
-use std::net::{SocketAddr, TcpListener};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 
 use socket2::{Domain, Socket, Type};
 use std::io::{self, prelude::*};
@@ -48,9 +48,16 @@ fn main() -> Result<()> {
 
     loop {
         match listener.accept() {
-            Ok((_stream, accept)) => {
-                info!(%accept, "Handling connection");
-                //stream.write(b"Hello")?;
+            Ok((mut accept_stream, accept)) => {
+                let srv = accept_stream.local_addr()?;
+                info!(%accept, server = %srv, "Handling connection");
+                let mut buf = [0u8; 2048];
+                accept_stream.read(&mut buf[..])?;
+                let mut stream =
+                    TcpStream::connect(srv).expect("Couldn't connect to the server...");
+                stream.write(&buf)?;
+                stream.read(&mut buf[..])?;
+                accept_stream.write(&buf)?;
                 break;
             }
             Err(e) => {
