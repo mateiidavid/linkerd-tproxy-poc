@@ -8,9 +8,6 @@ COPY . .
 
 #RUN cargo build --target x86_64-unknown-linux-musl --release 
 RUN cargo build --release
-####################################################################################################
-## Final image
-####################################################################################################
 #FROM alpine:20210212
 FROM debian:buster-slim as runtime
 #RUN apk add iptables
@@ -26,6 +23,6 @@ RUN apt-get update \
 WORKDIR app
 # Copy our build
 #COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/linkerd-tproxy-poc /usr/local/bin/linkerd-tproxy-poc
-COPY --from=builder /app/target/release/linkerd-tproxy-poc /usr/local/bin/linkerd-tproxy-poc
+COPY --from=builder /app/target/release/tproxy /usr/local/bin/tproxy
 ENV RUST_LOG=info
-ENTRYPOINT ["/usr/local/bin/linkerd-tproxy-poc"]
+ENTRYPOINT ["/usr/local/bin/tproxy"]
