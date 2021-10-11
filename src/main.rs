@@ -29,6 +29,8 @@ fn mk_redirect_socket(
     // IP_TRANSPARENT is mandatory for TPROXY
     socket.set_reuse_address(true)?;
     socket.set_freebind(true)?;
+    socket.set_ip_transparent(true)?;
+    socket.set_mark(1)?;
     socket.bind(src_addr)?;
     socket.connect(dst_addr)?;
     Ok(TcpStream::from(socket))
@@ -36,7 +38,8 @@ fn mk_redirect_socket(
 // Using tokio mostly for the `net` feature
 // don't want to set socket opts using "unsafe"
 #[tracing::instrument]
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let Cmd {
         addr,
@@ -73,25 +76,27 @@ fn main() -> Result<()> {
                 let dst_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 3000);
                 let src_addr = {
                     let src_ip = &accept.ip();
-                    SocketAddr::new(*src_ip, 0)
+                    SocketAddr::new(*src_ip, 7000)
                 };
-                let remote = mk_redirect_socket(&src_addr.into(), &dst_addr.into());
-                if let Ok(mut stream) = remote {
-                    let local = stream.local_addr()?;
-                    let remote = stream.peer_addr()?;
-                    info!(%local, "Connected to {}", remote);
-                    let sz = stream.write(&buf[..sz])?;
-                    info!(server = %srv, "Wrote {} bytes", sz);
-                    stream.read(&mut buf[..])?;
-                    info!(server = %srv, "Read {} bytes", sz);
-                } else if let Err(e) = remote {
-                    error!(error = %e, server = %dst_addr, "failed to connect to server");
-                    break;
-                }
+                tokio::spawn(async move {
+                    let remote = mk_redirect_socket(&src_addr.into(), &dst_addr.into());
+                    if let Ok(mut stream) = remote {
+                        let local = stream.local_addr().expect("failed to read local addr");
+                        let remote = stream.peer_addr().expect("failed to read peer addr");
+                        info!(%local, "Connected to {}", remote);
+                        let sz = stream.write(&buf[..sz]).expect("failed to write");
+                        info!(server = %srv, "Wrote {} bytes", sz);
+                        stream.read(&mut buf[..]).expect("failed to read");
+                        info!(server = %srv, "Read {} bytes", sz);
+                    } else if let Err(e) = remote {
+                        error!(error = %e, server = %srv, "failed to connect to server");
+                        //break;
+                    }
+                });
             }
             Err(e) => {
                 info!(?e, "Error on conn accept");
-                panic!("for now just panic");
+                break;
             }
         }
     }
@@ -135,11 +140,11 @@ fn init_iptables() -> Result<()> {
             "mangle",
             "-A",
             "PREROUTING",
+            "-p",
+            "tcp",
             "!",
             "-d",
             "127.0.0.1/32",
-            "-p",
-            "tcp",
             "--dport",
             "3000",
             "-j",
