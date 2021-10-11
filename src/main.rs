@@ -23,8 +23,6 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 #[tracing::instrument]
 fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
-    info!("HALLO");
-    println!("HALLO)O");
     let Cmd {
         addr,
         disable_rules,
@@ -109,7 +107,7 @@ fn init_iptables() -> Result<()> {
             "-p",
             "tcp",
             "--dport",
-            "80",
+            "3000",
             "-j",
             "TPROXY",
             "--tproxy-mark",
