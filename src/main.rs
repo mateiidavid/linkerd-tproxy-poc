@@ -1,10 +1,10 @@
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 
 use socket2::{Domain, Socket, Type};
 use std::io::{self, prelude::*};
 use std::process::{Command, Output};
 use structopt::StructOpt;
-use tracing::info;
+use tracing::{error, info};
 
 #[derive(StructOpt, Debug)]
 struct Cmd {
@@ -18,6 +18,21 @@ struct Cmd {
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
+#[tracing::instrument]
+fn mk_redirect_socket(
+    src_addr: &socket2::SockAddr,
+    dst_addr: &socket2::SockAddr,
+) -> io::Result<TcpStream> {
+    info!(?src_addr, ?dst_addr, "Making client socket");
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(socket2::Protocol::TCP))?;
+    // Set IP_TRANSPARENT sock opt, requires CAP_ADMIN_NET
+    // IP_TRANSPARENT is mandatory for TPROXY
+    socket.set_reuse_address(true)?;
+    socket.set_freebind(true)?;
+    socket.bind(src_addr)?;
+    socket.connect(dst_addr)?;
+    Ok(TcpStream::from(socket))
+}
 // Using tokio mostly for the `net` feature
 // don't want to set socket opts using "unsafe"
 #[tracing::instrument]
@@ -39,24 +54,40 @@ fn main() -> Result<()> {
         // Set IP_TRANSPARENT sock opt, requires CAP_ADMIN_NET
         // IP_TRANSPARENT is mandatory for TPROXY
         socket.set_ip_transparent(true)?;
+        socket.set_reuse_address(true)?;
         socket.bind(&addr.into())?;
         socket.listen(10)?;
         socket.into()
     };
 
     loop {
+        // spawn here, check for looping to make sure ...
         match listener.accept() {
             Ok((mut accept_stream, accept)) => {
                 let srv = accept_stream.local_addr()?;
                 info!(%accept, server = %srv, "Handling connection");
                 let mut buf = [0u8; 2048];
-                accept_stream.read(&mut buf[..])?;
-                let mut stream =
-                    TcpStream::connect(srv).expect("Couldn't connect to the server...");
-                stream.write(&buf)?;
-                stream.read(&mut buf[..])?;
-                accept_stream.write(&buf)?;
-                break;
+                let sz = accept_stream.read(&mut buf[..])?;
+                info!(client = %accept, "Read {} bytes", sz);
+
+                let dst_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 3000);
+                let src_addr = {
+                    let src_ip = &accept.ip();
+                    SocketAddr::new(*src_ip, 0)
+                };
+                let remote = mk_redirect_socket(&src_addr.into(), &dst_addr.into());
+                if let Ok(mut stream) = remote {
+                    let local = stream.local_addr()?;
+                    let remote = stream.peer_addr()?;
+                    info!(%local, "Connected to {}", remote);
+                    let sz = stream.write(&buf[..sz])?;
+                    info!(server = %srv, "Wrote {} bytes", sz);
+                    stream.read(&mut buf[..])?;
+                    info!(server = %srv, "Read {} bytes", sz);
+                } else if let Err(e) = remote {
+                    error!(error = %e, server = %dst_addr, "failed to connect to server");
+                    break;
+                }
             }
             Err(e) => {
                 info!(?e, "Error on conn accept");
@@ -97,13 +128,16 @@ fn init_iptables() -> Result<()> {
     };
 
     // iptables -t mangle -A PREROUTING -p tcp --dport 80 -j TPROXY --tproxy-mark 0x1/0x1 --on-port 50080
-    info!("Adding redirect rule; from dport 80 to 5000");
+    info!("Adding redirect rule; from dport 3000 to 5000");
     let tproxy = Command::new("iptables")
         .args([
             "-t",
             "mangle",
             "-A",
             "PREROUTING",
+            "!",
+            "-d",
+            "127.0.0.1/32",
             "-p",
             "tcp",
             "--dport",
@@ -124,7 +158,14 @@ fn init_iptables() -> Result<()> {
         .output()
         .expect("failed to list rules");
     io::stdout().write_all(&saved.stdout).unwrap();
+    let routes = Command::new("ip")
+        .args(["route", "show", "table", "all"])
+        .output()
+        .expect("failed to list rules");
+    io::stdout().write_all(&routes.stdout).unwrap();
+
     //ipt.append(table, chain, rule);
+    //p route show
 
     /*
          * assert!(ipt.new_chain("nat", "NEWCHAINNAME").is_ok());
@@ -157,14 +198,7 @@ fn route_table() -> (
     // TODO: explain
     let add_route = Command::new("ip")
         .args([
-            "route",
-            "add",
-            "local",
-            "0.0.0.0/0",
-            "dev",
-            "lo",
-            "table",
-            "100",
+            "route", "add", "local", "default", "dev", "lo", "table", "100",
         ])
         .output();
     (add_fwmark, add_route)
