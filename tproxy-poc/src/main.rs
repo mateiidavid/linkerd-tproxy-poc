@@ -155,6 +155,25 @@ fn init_iptables() -> Result<()> {
         [
             "-t",
             "mangle",
+            "-I",
+            "OUTPUT",
+            "-s",
+            "127.0.0.1/32",
+            "!",
+            "-d",
+            "127.0.0.1/32",
+            "-j",
+            "MARK",
+            "--set-xmark",
+            "1",
+        ],
+    )
+    .expect("could not exec conn_mark preroute save mark");
+    exec_cmd(
+        "iptables",
+        [
+            "-t",
+            "mangle",
             "-A",
             "OUTPUT",
             "-m",
@@ -219,6 +238,8 @@ fn init_iptables() -> Result<()> {
         .expect("failed to list rules");
     io::stdout().write_all(&routes.stdout).unwrap();
 
+    exec_cmd("sysctl", ["-w", "net/ipv4/conf/eth0/route_localnet=1"]).unwrap();
+    exec_cmd("sysctl", ["net/ipv4/conf/eth0/route_localnet"]).unwrap();
     Ok(())
 }
 
