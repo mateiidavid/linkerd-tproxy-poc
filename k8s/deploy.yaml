@@ -1,7 +1,7 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: poc
+  name: tproxy-poc
 spec:
   selector:
     matchLabels:
@@ -12,8 +12,8 @@ spec:
         app: poc
     spec:
       containers:
-      - name: poc
-        image: linkerd-tproxy-poc:v0.8
+      - name: tproxy
+        image: tproxy-poc:latest
         imagePullPolicy: IfNotPresent
         securityContext:
           allowPrivilegeEscalation: false
@@ -23,4 +23,21 @@ spec:
             - NET_RAW
           runAsUser: 0
           runAsNonRoot: false
-      restartPolicy: Always
+        env:
+        - name: RUST_LOG
+          value: trace
+      - name: server
+        imagePullPolicy: IfNotPresent
+        image: echo-server:latest
+        resources: {}
+        env:
+        - name: RUST_LOG
+          value: trace
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            add:
+            - NET_ADMIN
+            - NET_RAW
+          runAsNonRoot: false
+          runAsUser: 0

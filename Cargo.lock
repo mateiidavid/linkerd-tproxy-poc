@@ -98,6 +98,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "echo-server"
+version = "0.1.0"
+dependencies = [
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "heck"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -152,18 +160,6 @@ name = "libc"
 version = "0.2.103"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd8f7255a17a627354f321ef0055d63b898c6fb27eff628af4d1b66b7331edf6"
-
-[[package]]
-name = "linkerd-tproxy-poc"
-version = "0.1.0"
-dependencies = [
- "iptables",
- "socket2",
- "structopt",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
 
 [[package]]
 name = "lock_api"
@@ -545,6 +541,18 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "tproxy-poc"
+version = "0.1.0"
+dependencies = [
+ "iptables",
+ "socket2",
+ "structopt",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

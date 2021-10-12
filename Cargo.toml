@@ -1,0 +1,6 @@
+[workspace]
+
+members = [
+  "tproxy-poc",
+   "echo-server"
+]
