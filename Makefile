@@ -2,6 +2,9 @@ TPROXY_IMAGE ?= latest
 ECHO_IMAGE ?= latest
 CLUSTER_NAME ?= dev
 
+#-----------------#
+# TPROXY & SERVER #
+#-----------------#
 .PHONY: all
 all: tproxy-poc server load-image
 
@@ -17,5 +20,14 @@ server: ## Build echo server image
 load-image: ## Loads image into k3d
 	k3d image import --cluster $(CLUSTER_NAME) tproxy-poc:$(TPROXY_IMAGE) echo-server:$(ECHO_IMAGE)
 
+#-----------------#
+# TPROXY          #
+#-----------------#
+.PHONY: tproxy
+tproxy: tproxy-poc tproxy-image
+
+.PHONY: tproxy-image
+tproxy-image: ## Loads tproxy into k3d
+	k3d image import --cluster $(CLUSTER_NAME) tproxy-poc:$(TPROXY_IMAGE)
 
 
