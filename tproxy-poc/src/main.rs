@@ -1,3 +1,4 @@
+use std::ffi::OsStr;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 
 use socket2::{Domain, Socket, Type};
@@ -23,7 +24,6 @@ fn mk_redirect_socket(
     src_addr: &socket2::SockAddr,
     dst_addr: &socket2::SockAddr,
 ) -> io::Result<TcpStream> {
-    info!(?src_addr, ?dst_addr, "Making client socket");
     let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(socket2::Protocol::TCP))?;
     // Set IP_TRANSPARENT sock opt, requires CAP_ADMIN_NET
     // IP_TRANSPARENT is mandatory for TPROXY
@@ -31,6 +31,8 @@ fn mk_redirect_socket(
     socket.set_freebind(true)?;
     socket.set_ip_transparent(true)?;
     socket.set_mark(1)?;
+    let opts = (socket.ip_transparent()?, socket.freebind()?, socket.mark()?);
+    info!(is_transparent = %opts.0, is_freebind = %opts.1, sock_mark = %opts.2, "Making redirect client socket");
     socket.bind(src_addr)?;
     socket.connect(dst_addr)?;
     Ok(TcpStream::from(socket))
@@ -45,7 +47,6 @@ async fn main() -> Result<()> {
         addr,
         disable_rules,
     } = Cmd::from_args();
-
     if !disable_rules {
         info!("Setting up iptables");
         init_iptables()?;
@@ -67,29 +68,26 @@ async fn main() -> Result<()> {
         // spawn here, check for looping to make sure ...
         match listener.accept() {
             Ok((mut accept_stream, accept)) => {
-                let srv = accept_stream.local_addr()?;
-                info!(%accept, server = %srv, "Handling connection");
+                let local_addr = accept_stream.local_addr()?;
+                info!(%accept, server = %local_addr, "Handling connection");
                 let mut buf = [0u8; 2048];
                 let sz = accept_stream.read(&mut buf[..])?;
                 info!(client = %accept, "Read {} bytes", sz);
-
-                let dst_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 3000);
-                let src_addr = {
-                    let src_ip = &accept.ip();
-                    SocketAddr::new(*src_ip, 7000)
-                };
+                let bind_addr = SocketAddr::new(accept.ip(), 0);
+                let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 3000);
                 tokio::spawn(async move {
-                    let remote = mk_redirect_socket(&src_addr.into(), &dst_addr.into());
+                    let remote = mk_redirect_socket(&bind_addr.into(), &remote_addr.into());
                     if let Ok(mut stream) = remote {
-                        let local = stream.local_addr().expect("failed to read local addr");
-                        let remote = stream.peer_addr().expect("failed to read peer addr");
-                        info!(%local, "Connected to {}", remote);
+                        let mut buf = [0u8; 2048];
+                        let local_addr = stream.local_addr().expect("failed to read local addr");
+                        let remote_addr = stream.peer_addr().expect("failed to read peer addr");
+                        info!(%local_addr, "Connected to {}", remote_addr);
                         let sz = stream.write(&buf[..sz]).expect("failed to write");
-                        info!(server = %srv, "Wrote {} bytes", sz);
+                        info!(%remote_addr, %local_addr, "Wrote {} bytes", sz);
                         stream.read(&mut buf[..]).expect("failed to read");
-                        info!(server = %srv, "Read {} bytes", sz);
+                        info!(%remote_addr, %local_addr, "Read {} bytes", sz);
                     } else if let Err(e) = remote {
-                        error!(error = %e, server = %srv, "failed to connect to server");
+                        error!(error = %e, spoofed_client = %accept, %remote_addr, "failed to connect to server");
                         //break;
                     }
                 });
@@ -134,6 +132,58 @@ fn init_iptables() -> Result<()> {
 
     // iptables -t mangle -A PREROUTING -p tcp --dport 80 -j TPROXY --tproxy-mark 0x1/0x1 --on-port 50080
     info!("Adding redirect rule; from dport 3000 to 5000");
+    exec_cmd(
+        "iptables",
+        [
+            "-t",
+            "mangle",
+            "-I",
+            "PREROUTING",
+            "-m",
+            "mark",
+            "--mark",
+            "1",
+            "-j",
+            "CONNMARK",
+            "--save-mark",
+        ],
+    )
+    .expect("could not exec conn_mark preroute save mark");
+
+    exec_cmd(
+        "iptables",
+        [
+            "-t",
+            "mangle",
+            "-A",
+            "OUTPUT",
+            "-m",
+            "connmark",
+            "--mark",
+            "1",
+            "-j",
+            "CONNMARK",
+            "--restore-mark",
+        ],
+    )
+    .expect("could not exec conn_mark output restore mark");
+
+    exec_cmd(
+        "iptables",
+        [
+            "-t",
+            "mangle",
+            "-A",
+            "DIVERT_TEST",
+            "-m",
+            "conntrack",
+            "--ctstate",
+            "RELATED,ESTABLISHED",
+            "-j",
+            "RETURN",
+        ],
+    )
+    .unwrap();
     let tproxy = Command::new("iptables")
         .args([
             "-t",
@@ -142,11 +192,11 @@ fn init_iptables() -> Result<()> {
             "PREROUTING",
             "-p",
             "tcp",
+            "--dport",
+            "3000",
             "!",
             "-d",
             "127.0.0.1/32",
-            "--dport",
-            "3000",
             "-j",
             "TPROXY",
             "--tproxy-mark",
@@ -169,24 +219,6 @@ fn init_iptables() -> Result<()> {
         .expect("failed to list rules");
     io::stdout().write_all(&routes.stdout).unwrap();
 
-    //ipt.append(table, chain, rule);
-    //p route show
-
-    /*
-         * assert!(ipt.new_chain("nat", "NEWCHAINNAME").is_ok());
-    assert!(ipt.append("nat", "NEWCHAINNAME", "-j ACCEPT").is_ok());
-    assert!(ipt.exists("nat", "NEWCHAINNAME", "-j ACCEPT").unwrap());
-    assert!(ipt.delete("nat", "NEWCHAINNAME", "-j ACCEPT").is_ok());
-    assert!(ipt.delete_chain("nat", "NEWCHAINNAME").is_ok());
-    */
-
-    /*
-         * # iptables -t mangle -N DIVERT
-    # iptables -t mangle -A PREROUTING -p tcp -m socket -j DIVERT
-    # iptables -t mangle -A DIVERT -j MARK --set-mark 1
-    # iptables -t mangle -A DIVERT -j ACCEPT
-         */
-
     Ok(())
 }
 
@@ -203,8 +235,27 @@ fn route_table() -> (
     // TODO: explain
     let add_route = Command::new("ip")
         .args([
-            "route", "add", "local", "default", "dev", "lo", "table", "100",
+            "route",
+            "add",
+            "local",
+            "0.0.0.0/0",
+            "dev",
+            "lo",
+            "table",
+            "100",
         ])
         .output();
     (add_fwmark, add_route)
+}
+
+fn exec_cmd<I, S>(cmd: &str, args: I) -> io::Result<()>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let cmd = Command::new(cmd)
+        .args(args)
+        .output()
+        .expect("failed to set up connmark save");
+    io::stdout().write_all(&cmd.stdout)
 }
