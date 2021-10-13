@@ -132,7 +132,7 @@ fn init_iptables() -> Result<()> {
     // ++++++++++++++++
     // + TPROXY RULES +
     // ++++++++++++++++
-    // * 
+    // *
     info!("Adding redirect rule; from dport 3000 to 5000");
     exec(
         "iptables",
@@ -148,25 +148,6 @@ fn init_iptables() -> Result<()> {
             "-j",
             "CONNMARK",
             "--save-mark",
-        ],
-    )?;
-
-    exec(
-        "iptables",
-        [
-            "-t",
-            "mangle",
-            "-I",
-            "OUTPUT",
-            "-s",
-            "127.0.0.1/32",
-            "!",
-            "-d",
-            "127.0.0.1/32",
-            "-j",
-            "MARK",
-            "--set-xmark",
-            "1",
         ],
     )?;
 
