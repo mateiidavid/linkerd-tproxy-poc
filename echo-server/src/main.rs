@@ -11,7 +11,6 @@ fn main() -> io::Result<()> {
     loop {
         info!("Accepting");
         let (mut stream, accept) = listener.accept()?;
-        info!("Accepted");
         let srv = stream.local_addr()?;
         info!(%srv, %accept, "Connection accepted");
         let mut buf = [0u8; 2048];
@@ -21,7 +20,8 @@ fn main() -> io::Result<()> {
                 break;
             }
             Ok(sz) => {
-                info!("Read {} bytes", sz);
+                let data = std::str::from_utf8(&buf[..sz]).unwrap();
+                info!("Read {} bytes: {}", sz, data);
                 let sz = stream.write(b"Well, hello!")?;
                 info!("Wrote {} bytes", sz);
             }

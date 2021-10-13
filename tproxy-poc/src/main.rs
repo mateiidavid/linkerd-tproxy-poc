@@ -19,7 +19,6 @@ struct Cmd {
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-#[tracing::instrument]
 fn mk_redirect_socket(
     src_addr: &socket2::SockAddr,
     dst_addr: &socket2::SockAddr,
@@ -37,8 +36,7 @@ fn mk_redirect_socket(
     socket.connect(dst_addr)?;
     Ok(TcpStream::from(socket))
 }
-// Using tokio mostly for the `net` feature
-// don't want to set socket opts using "unsafe"
+
 #[tracing::instrument]
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -72,20 +70,23 @@ async fn main() -> Result<()> {
                 info!(%accept, server = %local_addr, "Handling connection");
                 let mut buf = [0u8; 2048];
                 let sz = accept_stream.read(&mut buf[..])?;
-                info!(client = %accept, "Read {} bytes", sz);
+                info!(client = %accept, "Read {} bytes from client", sz);
                 let bind_addr = SocketAddr::new(accept.ip(), 0);
                 let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 3000);
                 tokio::spawn(async move {
                     let remote = mk_redirect_socket(&bind_addr.into(), &remote_addr.into());
                     if let Ok(mut stream) = remote {
-                        let mut buf = [0u8; 2048];
                         let local_addr = stream.local_addr().expect("failed to read local addr");
                         let remote_addr = stream.peer_addr().expect("failed to read peer addr");
                         info!(%local_addr, "Connected to {}", remote_addr);
-                        let sz = stream.write(&buf[..sz]).expect("failed to write");
-                        info!(%remote_addr, %local_addr, "Wrote {} bytes", sz);
-                        stream.read(&mut buf[..]).expect("failed to read");
-                        info!(%remote_addr, %local_addr, "Read {} bytes", sz);
+                        stream
+                            .write(b"Hello, this is redirect speaking")
+                            .expect("failed to write");
+                        info!(%remote_addr, %local_addr, "Wrote {} bytes to server", sz);
+                        let mut buf = [0u8; 2048];
+                        let sz = stream.read(&mut buf[..]).expect("failed to read");
+                        let read = std::str::from_utf8(&buf[..sz]).unwrap();
+                        info!(%remote_addr, %local_addr, "Read {} bytes from server: {}", sz, read);
                     } else if let Err(e) = remote {
                         error!(error = %e, spoofed_client = %accept, %remote_addr, "failed to connect to server");
                         //break;
@@ -132,7 +133,7 @@ fn init_iptables() -> Result<()> {
 
     // iptables -t mangle -A PREROUTING -p tcp --dport 80 -j TPROXY --tproxy-mark 0x1/0x1 --on-port 50080
     info!("Adding redirect rule; from dport 3000 to 5000");
-    exec_cmd(
+    exec(
         "iptables",
         [
             "-t",
@@ -147,10 +148,9 @@ fn init_iptables() -> Result<()> {
             "CONNMARK",
             "--save-mark",
         ],
-    )
-    .expect("could not exec conn_mark preroute save mark");
+    )?;
 
-    exec_cmd(
+    exec(
         "iptables",
         [
             "-t",
@@ -167,9 +167,9 @@ fn init_iptables() -> Result<()> {
             "--set-xmark",
             "1",
         ],
-    )
-    .expect("could not exec conn_mark preroute save mark");
-    exec_cmd(
+    )?;
+
+    exec(
         "iptables",
         [
             "-t",
@@ -184,10 +184,9 @@ fn init_iptables() -> Result<()> {
             "CONNMARK",
             "--restore-mark",
         ],
-    )
-    .expect("could not exec conn_mark output restore mark");
+    )?;
 
-    exec_cmd(
+    exec(
         "iptables",
         [
             "-t",
@@ -203,16 +202,16 @@ fn init_iptables() -> Result<()> {
         ],
     )
     .unwrap();
-    let tproxy = Command::new("iptables")
-        .args([
+    // TPROXY rule
+    exec(
+        "iptables",
+        [
             "-t",
             "mangle",
             "-A",
             "PREROUTING",
             "-p",
             "tcp",
-            "--dport",
-            "3000",
             "!",
             "-d",
             "127.0.0.1/32",
@@ -222,24 +221,15 @@ fn init_iptables() -> Result<()> {
             "0x1/0x1",
             "--on-port",
             "5000",
-        ])
-        .output()
-        .expect("failed to set up tproxy");
-    io::stdout().write_all(&tproxy.stdout).unwrap();
+        ],
+    )?;
 
-    let saved = Command::new("iptables-legacy")
-        .args(["-t", "mangle", "-L"])
-        .output()
-        .expect("failed to list rules");
-    io::stdout().write_all(&saved.stdout).unwrap();
-    let routes = Command::new("ip")
-        .args(["route", "show", "table", "all"])
-        .output()
-        .expect("failed to list rules");
-    io::stdout().write_all(&routes.stdout).unwrap();
+    // Show saved iptables state and routes
+    exec("iptables-legacy", ["-t", "mangle", "-L"])?;
+    // Route table 100 constructed for packets that are marked
+    exec("ip", ["route", "show", "table", "100"])?;
 
-    exec_cmd("sysctl", ["-w", "net/ipv4/conf/eth0/route_localnet=1"]).unwrap();
-    exec_cmd("sysctl", ["net/ipv4/conf/eth0/route_localnet"]).unwrap();
+    exec("sysctl", ["-w", "net/ipv4/conf/eth0/route_localnet=1"])?;
     Ok(())
 }
 
@@ -269,7 +259,7 @@ fn route_table() -> (
     (add_fwmark, add_route)
 }
 
-fn exec_cmd<I, S>(cmd: &str, args: I) -> io::Result<()>
+fn exec<I, S>(cmd: &str, args: I) -> io::Result<()>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
@@ -277,6 +267,6 @@ where
     let cmd = Command::new(cmd)
         .args(args)
         .output()
-        .expect("failed to set up connmark save");
+        .expect(&format!("failed to exec {}", cmd));
     io::stdout().write_all(&cmd.stdout)
 }
