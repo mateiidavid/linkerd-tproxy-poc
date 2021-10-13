@@ -105,24 +105,22 @@ async fn main() -> Result<()> {
 
 #[tracing::instrument]
 fn init_iptables() -> Result<()> {
-    info!("Setting up");
+    info!("Setting up iptables");
+    // IPTables bindings. Unfortunately, doesn't seem to play well with TPROXY
+    // module, so it's only being used to set up the initial rules and chains.
+    // This is mostly for marking packets and accepting connections on the
+    // DIVERT_TEST chain. The false here means we are NOT using IPV6.
     let ipt = iptables::new(false)?;
-    let table = "mangle";
-    let chains = ipt.list_chains(table)?;
+    let chains = ipt.list_chains("mangle")?;
     info!(?chains, "Current chains");
-    let chain = "DIVERT_TEST";
-    let divert_rules = ["-j MARK --set-mark 1", "-j ACCEPT"];
-    if !ipt.chain_exists(table, chain)? {
-        info!(%chain, "Creating inexistent chain");
-        ipt.new_chain(table, chain)?;
+    if !ipt.chain_exists("mangle", "DIVERT_TEST")? {
+        info!("Creating inexistent chain DIVERT_TEST");
+        ipt.new_chain("mangle", "DIVERT_TEST")?;
     }
     // Add DIVERT jump
-    ipt.append(table, "PREROUTING", "-p tcp -m socket -j DIVERT_TEST")?;
-
-    for rule in divert_rules {
-        info!(?table, ?chain, ?rule, "adding divert rule");
-        ipt.append(table, chain, rule)?;
-    }
+    ipt.append("mangle", "PREROUTING", "-p tcp -m socket -j DIVERT_TEST")?;
+    ipt.append("mangle", "DIVERT_TEST", "-j MARK --set-mark 1")?;
+    ipt.append("mangle", "DIVERT_TEST", "-j ACCEPT")?;
     info!("Configuring route table");
     let _ = {
         let (fwmark, route) = route_table();
@@ -131,7 +129,10 @@ fn init_iptables() -> Result<()> {
         info!(?route, ?fwmark, "ip table rules");
     };
 
-    // iptables -t mangle -A PREROUTING -p tcp --dport 80 -j TPROXY --tproxy-mark 0x1/0x1 --on-port 50080
+    // ++++++++++++++++
+    // + TPROXY RULES +
+    // ++++++++++++++++
+    // * 
     info!("Adding redirect rule; from dport 3000 to 5000");
     exec(
         "iptables",
@@ -200,8 +201,7 @@ fn init_iptables() -> Result<()> {
             "-j",
             "RETURN",
         ],
-    )
-    .unwrap();
+    )?;
     // TPROXY rule
     exec(
         "iptables",
