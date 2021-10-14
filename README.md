@@ -50,7 +50,7 @@ To make it easier to build, there is a makefile present, it will build and load
 the images in a k3d cluster.
 
 **Example**
-```sh
+```bash
 # 'make all' will build 'tproxy-poc', 'echo-server' and load the images in a k3d cluster.
 # the name of the cluster can be overwritten through CLUSTER_NAME, the default is 'dev'.
 # Both images will be tagged as 'latest', the provided manifests pull in the latest image.
@@ -83,3 +83,13 @@ $ k3d cluster create dev
 $ make all
 $ kubectl apply -f k8s/deploy-tproxy.yaml
 ```
+
+## Testing
+
+To help with testing, there's a curl pod included in the `k8s` directory.
+Simply apply the curl pod, exec onto it and send requests to a pod containing
+`tproxy-poc`. I suggest bypassing any virtual IPs and sending directly to the
+pod IP. You may also use `nc` instead of curl, it shouldn't matter much.
+
+Look out for log messages that record what the local and peer addresses of a
+connection are.
