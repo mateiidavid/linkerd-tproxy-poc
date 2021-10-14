@@ -147,16 +147,52 @@ fn init_iptables(mode: InterceptMode) -> Result<()> {
     // This is mostly for marking packets and accepting connections on the
     // DIVERT_TEST chain. The false here means we are NOT using IPV6.
     let ipt = iptables::new(false)?;
-    let chains = ipt.list_chains("mangle")?;
-    info!(?chains, "Current chains");
-    if !ipt.chain_exists("mangle", "DIVERT_TEST")? {
-        info!("Creating inexistent chain DIVERT_TEST");
-        ipt.new_chain("mangle", "DIVERT_TEST")?;
+    match mode {
+        InterceptMode::Tproxy() => {
+            let chains = ipt.list_chains("mangle")?;
+            info!(?chains, "Current state for mangle");
+            if !ipt.chain_exists("mangle", "DIVERT_TEST")? {
+                info!("Creating inexistent chain DIVERT_TEST");
+                ipt.new_chain("mangle", "DIVERT_TEST")?;
+            }
+            // Add DIVERT jump
+            ipt.append("mangle", "PREROUTING", "-p tcp -m socket -j DIVERT_TEST")?;
+            ipt.append("mangle", "DIVERT_TEST", "-j MARK --set-mark 1")?;
+            ipt.append("mangle", "DIVERT_TEST", "-j ACCEPT")?;
+            // TPROXY rule
+            exec(
+                "iptables",
+                [
+                    "-t",
+                    "mangle",
+                    "-A",
+                    "PREROUTING",
+                    "-p",
+                    "tcp",
+                    "!",
+                    "-d",
+                    "127.0.0.1/32",
+                    "-j",
+                    "TPROXY",
+                    "--tproxy-mark",
+                    "0x1/0x1",
+                    "--on-port",
+                    "5000",
+                ],
+            )?;
+        }
+        InterceptMode::Nat() => {
+            let chains = ipt.list_chains("nat")?;
+            info!(?chains, "Current state for nat");
+            if !ipt.chain_exists("nat", "INIT_REDIRECT")? {
+                info!("Creating inexistent chain INIT_REDIRECT");
+                ipt.new_chain("nat", "INIT_REDIRECT")?;
+            }
+            ipt.append("nat", "INIT_REDIRECT", "-p tcp -j REDIRECT --to-port 5000")?;
+            ipt.append("nat", "PREROUTING", "-j INIT_REDIRECT")?;
+        }
     }
-    // Add DIVERT jump
-    ipt.append("mangle", "PREROUTING", "-p tcp -m socket -j DIVERT_TEST")?;
-    ipt.append("mangle", "DIVERT_TEST", "-j MARK --set-mark 1")?;
-    ipt.append("mangle", "DIVERT_TEST", "-j ACCEPT")?;
+
     info!("Configuring route table");
     let _ = {
         let (fwmark, route) = route_table();
@@ -165,11 +201,10 @@ fn init_iptables(mode: InterceptMode) -> Result<()> {
         info!(?route, ?fwmark, "ip table rules");
     };
 
-    // ++++++++++++++++
-    // + TPROXY RULES +
-    // ++++++++++++++++
+    // ++++++++++++++++++
+    // + CONNMARK RULES +
+    // ++++++++++++++++++
     // *
-    info!("Adding redirect rule; from dport 3000 to 5000");
     exec(
         "iptables",
         [
@@ -201,43 +236,6 @@ fn init_iptables(mode: InterceptMode) -> Result<()> {
             "-j",
             "CONNMARK",
             "--restore-mark",
-        ],
-    )?;
-
-    exec(
-        "iptables",
-        [
-            "-t",
-            "mangle",
-            "-A",
-            "DIVERT_TEST",
-            "-m",
-            "conntrack",
-            "--ctstate",
-            "RELATED,ESTABLISHED",
-            "-j",
-            "RETURN",
-        ],
-    )?;
-    // TPROXY rule
-    exec(
-        "iptables",
-        [
-            "-t",
-            "mangle",
-            "-A",
-            "PREROUTING",
-            "-p",
-            "tcp",
-            "!",
-            "-d",
-            "127.0.0.1/32",
-            "-j",
-            "TPROXY",
-            "--tproxy-mark",
-            "0x1/0x1",
-            "--on-port",
-            "5000",
         ],
     )?;
 
