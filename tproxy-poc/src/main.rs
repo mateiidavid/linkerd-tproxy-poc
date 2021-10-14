@@ -16,6 +16,9 @@ struct Cmd {
     /// defaults to port 5000
     #[structopt(long, default_value = "0.0.0.0:5000")]
     addr: SocketAddr,
+    /// Intercept mode for tproxy poc. It can either be 'nat' or 'tproxy';
+    /// different modes will set up iptables differently, client IP will still
+    /// be spoofed.
     #[structopt(long)]
     mode: Option<InterceptMode>,
 }
