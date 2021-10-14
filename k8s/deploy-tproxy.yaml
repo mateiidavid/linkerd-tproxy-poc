@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tproxy-poc
+spec:
+  selector:
+    matchLabels:
+      app: poc
+  template:
+    metadata:
+      labels:
+        app: poc
+    spec:
+      containers:
+      - name: tproxy
+        image: tproxy-poc:latest
+        imagePullPolicy: IfNotPresent
+        args:
+          - --mode=tproxy
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            add:
+            - NET_ADMIN
+            - NET_RAW
+          runAsUser: 0
+          runAsNonRoot: false
+        env:
+        - name: RUST_LOG
+          value: trace
+      - name: server
+        imagePullPolicy: IfNotPresent
+        image: echo-server:latest
+        resources: {}
+        env:
+        - name: RUST_LOG
+          value: trace
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            add:
+            - NET_ADMIN
+            - NET_RAW
+          runAsNonRoot: false
+          runAsUser: 0
