@@ -22,8 +22,8 @@ load-image: ## Loads image into k3d
 
 .PHONY: kind-load
 kind-load:
-	kind load docker-image tproxy-poc:$(TPROXY_IMAGE) --name kind
-	kind load docker-image echo-server:$(TPROXY_IMAGE) --name kind
+	kind load docker-image tproxy-poc:$(TPROXY_IMAGE) --name $(CLUSTER_NAME)
+	kind load docker-image echo-server:$(ECHO_IMAGE) --name $(CLUSTER_NAME)
 
 #-----------------#
 # TPROXY          #
