@@ -1,11 +1,14 @@
 use std::ffi::OsStr;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::str::FromStr;
 
 use socket2::{Domain, Socket, Type};
 use std::io::{self, prelude::*};
 use std::process::{Command, Output};
 use structopt::StructOpt;
 use tracing::{error, info};
+
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 #[derive(StructOpt, Debug)]
 struct Cmd {
@@ -14,10 +17,26 @@ struct Cmd {
     #[structopt(long, default_value = "0.0.0.0:5000")]
     addr: SocketAddr,
     #[structopt(long)]
-    disable_rules: bool,
+    mode: Option<InterceptMode>,
 }
 
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+#[derive(Debug)]
+enum InterceptMode {
+    Tproxy(),
+    Nat(),
+}
+
+impl FromStr for InterceptMode {
+    type Err = &'static str;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_ref() {
+            "tproxy" => Ok(InterceptMode::Tproxy()),
+            "nat" => Ok(InterceptMode::Nat()),
+            _ => Err("intercept mode not supported"),
+        }
+    }
+}
 
 fn mk_redirect_socket(
     src_addr: &socket2::SockAddr,
@@ -41,14 +60,23 @@ fn mk_redirect_socket(
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
-    let Cmd {
-        addr,
-        disable_rules,
-    } = Cmd::from_args();
-    if !disable_rules {
-        info!("Setting up iptables");
-        init_iptables()?;
-    }
+    let Cmd { addr, mode } = Cmd::from_args();
+    let mode = if let Some(m) = mode {
+        match m {
+            InterceptMode::Tproxy() => {
+                info!("Using Tproxy rules for iptables");
+                init_iptables(m)?;
+                "tproxy"
+            }
+            InterceptMode::Nat() => {
+                info!("Using NAT rules for iptables");
+                init_iptables(m)?;
+                "nat"
+            }
+        }
+    } else {
+        panic!("No interception mode set!");
+    };
 
     let listener: TcpListener = {
         info!("Setting up listener");
@@ -72,7 +100,15 @@ async fn main() -> Result<()> {
                 let sz = accept_stream.read(&mut buf[..])?;
                 info!(client = %accept, "Read {} bytes from client", sz);
                 let bind_addr = SocketAddr::new(accept.ip(), 0);
-                let remote_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 3000);
+                let remote_addr = if mode == "tproxy" {
+                    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 3000)
+                } else {
+                    // socket2 doesn't have any functions to get SO_ORIGINAL_DST
+                    // from the socket, so we hardcode the local_addr and port
+                    // to send to app. We know ahead of time it will share the
+                    // same IP and listen on port 3000.
+                    SocketAddr::new(local_addr.ip(), 3000)
+                };
                 tokio::spawn(async move {
                     let remote = mk_redirect_socket(&bind_addr.into(), &remote_addr.into());
                     if let Ok(mut stream) = remote {
@@ -104,7 +140,7 @@ async fn main() -> Result<()> {
 }
 
 #[tracing::instrument]
-fn init_iptables() -> Result<()> {
+fn init_iptables(mode: InterceptMode) -> Result<()> {
     info!("Setting up iptables");
     // IPTables bindings. Unfortunately, doesn't seem to play well with TPROXY
     // module, so it's only being used to set up the initial rules and chains.
