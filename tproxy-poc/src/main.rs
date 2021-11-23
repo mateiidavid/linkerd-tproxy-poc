@@ -1,11 +1,12 @@
 use std::ffi::OsStr;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 
 use socket2::{Domain, Socket, Type};
 use std::io::{self, prelude::*};
 use std::process::{Command, Output};
 use structopt::StructOpt;
+use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -65,7 +66,8 @@ fn mk_redirect_socket(
     // bind-before-connect: for a client ip misdirect
     socket.bind(src_addr)?;
     socket.connect(dst_addr)?;
-    Ok(TcpStream::from(socket))
+    let stream = std::net::TcpStream::from(socket);
+    Ok(TcpStream::from_std(stream)?)
 }
 
 #[tracing::instrument]
@@ -104,7 +106,10 @@ async fn main() -> Result<()> {
         socket.set_reuse_address(true)?;
         socket.bind(&addr.into())?;
         socket.listen(10)?;
-        socket.into()
+        // sock2 does not have any traits to convert from a socket to an async
+        // tcp listener. Instead, we convert the socket into a sync listener and
+        // create tokio async listener from that.
+        TcpListener::from_std(socket.into())?
     };
 
     loop {
