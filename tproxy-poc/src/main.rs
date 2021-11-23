@@ -1,11 +1,13 @@
 use std::ffi::OsStr;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 
 use socket2::{Domain, Socket, Type};
 use std::io::{self, prelude::*};
 use std::process::{Command, Output};
 use structopt::StructOpt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tracing::{error, info};
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -65,7 +67,8 @@ fn mk_redirect_socket(
     // bind-before-connect: for a client ip misdirect
     socket.bind(src_addr)?;
     socket.connect(dst_addr)?;
-    Ok(TcpStream::from(socket))
+    let stream = std::net::TcpStream::from(socket);
+    Ok(TcpStream::from_std(stream)?)
 }
 
 #[tracing::instrument]
@@ -104,40 +107,44 @@ async fn main() -> Result<()> {
         socket.set_reuse_address(true)?;
         socket.bind(&addr.into())?;
         socket.listen(10)?;
-        socket.into()
+        // sock2 does not have any traits to convert from a socket to an async
+        // tcp listener. Instead, we convert the socket into a sync listener and
+        // create tokio async listener from that.
+        TcpListener::from_std(socket.into())?
     };
 
     loop {
-        match listener.accept() {
+        match listener.accept().await {
             Ok((mut accept_stream, accept)) => {
-                let local_addr = accept_stream.local_addr()?;
+                // Spawn a task to process incoming connections. Once a
+                // connection is established, we spawn a new task to process it.
+                // In the respective task, we create a redirect socket to talk
+                // to the application process local to the pod. This has the
+                // advantage of protecting against redirect loops where we would
+                // create a redirect socket that targets _this_ process. Thanks @eliza!
+                let local_addr = accept_stream.local_addr().unwrap();
                 info!(%accept, server = %local_addr, "Handling connection");
-
-                let mut buf = [0u8; 2048];
-                let sz = accept_stream.read(&mut buf[..])?;
-                info!(client = %accept, "Read {} bytes from client", sz);
-
-                // We need to create a new connection from the proxy to the
-                // application process. We will bind to the src IP of the client
-                // before we connect; the remote address will be either
-                // localhost: 3000 (if we are in tproxy mode) or podIP:3000.
-                // We can still use original address with tproxy, but it
-                // requires additional ipt rules.
-                let bind_addr = accept.clone();
-                let remote_addr = if mode == "tproxy" {
-                    SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 3000)
-                } else {
-                    // socket2 doesn't have any functions to get SO_ORIGINAL_DST
-                    // from the socket, so we hardcode the local_addr and port
-                    // to send to app. We know ahead of time it will share the
-                    // same IP and listen on port 3000.
-                    SocketAddr::new(local_addr.ip(), 3000)
-                };
-                // Spawn a task to read and write to application process. The
-                // POC is blocking (mostly), however, this is a good sanity
-                // check to make sure we don't get in redirect loops where we
-                // open a connection back to the proxy. Thanks @eliza.
                 tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    let sz = accept_stream.read(&mut buf[..]).await.unwrap();
+                    info!(client = %accept, "Read {} bytes from client", sz);
+
+                    // We need to create a new connection from the proxy to the
+                    // application process. We will bind to the src IP of the client
+                    // before we connect; the remote address will be either
+                    // localhost: 3000 (if we are in tproxy mode) or podIP:3000.
+                    // We can still use original address with tproxy, but it
+                    // requires additional ipt rules.
+                    let bind_addr = accept.clone();
+                    let remote_addr = if mode == "tproxy" {
+                        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 3000)
+                    } else {
+                        // socket2 doesn't have any functions to get SO_ORIGINAL_DST
+                        // from the socket, so we hardcode the local_addr and port
+                        // to send to app. We know ahead of time it will share the
+                        // same IP and listen on port 3000.
+                        SocketAddr::new(local_addr.ip(), 3000)
+                    };
                     // Create connection to application process; read and write
                     // so we confirm traffic is flowing. We log out the peer and
                     // local addresses to confirm clientIP was spoofed.
@@ -148,10 +155,12 @@ async fn main() -> Result<()> {
                         info!(%local_addr, "Connected to {}", remote_addr);
                         stream
                             .write(b"Hello, this is redirect speaking")
+                            .await
                             .expect("failed to write");
                         info!(%remote_addr, %local_addr, "Wrote {} bytes to server", sz);
+
                         let mut buf = [0u8; 2048];
-                        let sz = stream.read(&mut buf[..]).expect("failed to read");
+                        let sz = stream.read(&mut buf[..]).await.expect("failed to read");
                         let read = std::str::from_utf8(&buf[..sz]).unwrap();
                         info!(%remote_addr, %local_addr, "Read {} bytes from server: {}", sz, read);
                     } else if let Err(e) = remote {
